@@ -260,6 +260,10 @@ func parseKeyValuePairs(c *cli.Command, flag string) (map[string]string, error) 
 type loadParams struct {
 	requireURL     bool
 	confirmProject bool
+	// allowNoSecret permits resolving a project with an API key but no API
+	// secret — used when the caller supplies an asymmetric private key to sign
+	// with instead of the shared HMAC secret.
+	allowNoSecret bool
 }
 
 type loadOption func(*loadParams)
@@ -270,6 +274,9 @@ var (
 	}
 	confirmProject = func(p *loadParams) {
 		p.confirmProject = true
+	}
+	optionalSecret = func(p *loadParams) {
+		p.allowNoSecret = true
 	}
 )
 
@@ -377,7 +384,7 @@ func resolveProject(c *cli.Command, p loadParams) (*resolvedProject, error) {
 		}
 		pc.APISecret = val
 	}
-	if pc.APIKey != "" && pc.APISecret != "" && (pc.URL != "" || !p.requireURL) {
+	if pc.APIKey != "" && (pc.APISecret != "" || p.allowNoSecret) && (pc.URL != "" || !p.requireURL) {
 		var envVars []string
 		// if it's set via env, we should let users know
 		if os.Getenv("LIVEKIT_URL") == pc.URL && pc.URL != "" {
@@ -386,7 +393,7 @@ func resolveProject(c *cli.Command, p loadParams) (*resolvedProject, error) {
 		if os.Getenv("LIVEKIT_API_KEY") == pc.APIKey {
 			envVars = append(envVars, "api-key")
 		}
-		if os.Getenv("LIVEKIT_API_SECRET") == pc.APISecret {
+		if pc.APISecret != "" && os.Getenv("LIVEKIT_API_SECRET") == pc.APISecret {
 			envVars = append(envVars, "api-secret")
 		}
 		if len(envVars) > 0 {
@@ -425,7 +432,7 @@ func resolveProject(c *cli.Command, p loadParams) (*resolvedProject, error) {
 	if pc.APIKey == "" {
 		return nil, errors.New("api-key is required")
 	}
-	if pc.APISecret == "" {
+	if pc.APISecret == "" && !p.allowNoSecret {
 		return nil, errors.New("api-secret is required")
 	}
 

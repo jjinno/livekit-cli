@@ -16,7 +16,10 @@ package main
 
 import (
 	"context"
+	"crypto"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -135,6 +138,11 @@ var (
 						&cli.StringFlag{
 							Name:  "grant",
 							Usage: "Additional `VIDEO_GRANT` fields. It'll be merged with other arguments (JSON formatted)",
+						},
+						&cli.StringFlag{
+							Name:      "private-key",
+							Usage:     "`PATH` to a PEM-encoded private key (ECDSA/RSA/Ed25519) to sign the token asymmetrically instead of with the API secret. The API key is still used as the token issuer.",
+							TakesFile: true,
 						},
 						&cli.StringFlag{
 							Name:  "agent",
@@ -414,12 +422,32 @@ func createToken(ctx context.Context, c *cli.Command) error {
 		}
 	}
 
-	_, err = requireProjectWithOpts(ctx, c, ignoreURL)
+	privateKeyPath := c.String("private-key")
+	loadOpts := []loadOption{ignoreURL}
+	if privateKeyPath != "" {
+		// Asymmetric signing uses the private key as the credential, so an API
+		// secret is not required — only the API key, as the token issuer.
+		loadOpts = append(loadOpts, optionalSecret)
+	}
+	_, err = requireProjectWithOpts(ctx, c, loadOpts...)
 	if err != nil {
 		return err
 	}
 
 	at := accessToken(project.APIKey, project.APISecret, grant, participant)
+
+	if privateKeyPath != "" {
+		if project.APIKey == "" {
+			return errors.New("--private-key requires an API key to use as the token issuer")
+		}
+		signingKey, err := loadSigningKeyPEM(privateKeyPath)
+		if err != nil {
+			return err
+		}
+		// at is non-nil here: an API key is required above, so accessToken
+		// returned a token even though the secret was omitted.
+		at.SetPrivateKey(signingKey)
+	}
 
 	if inferenceGrant {
 		at.SetInferenceGrant(&auth.InferenceGrant{Perform: true})
@@ -505,6 +533,30 @@ func createToken(ctx context.Context, c *cli.Command) error {
 	}
 
 	return nil
+}
+
+// loadSigningKeyPEM reads a PEM-encoded private key (PKCS#8, SEC1 EC, or PKCS#1
+// RSA) for asymmetric token signing. The signing algorithm is derived from the
+// key type by the auth package (e.g. an ECDSA P-256 key signs ES256).
+func loadSigningKeyPEM(path string) (crypto.PrivateKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("no PEM block found in %s", path)
+	}
+	if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	return nil, fmt.Errorf("could not parse a supported private key from %s", path)
 }
 
 func accessToken(apiKey, apiSecret string, grant *auth.VideoGrant, identity string) *auth.AccessToken {
